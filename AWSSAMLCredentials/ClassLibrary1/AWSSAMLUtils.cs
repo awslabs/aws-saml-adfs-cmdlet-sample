@@ -12,6 +12,7 @@
  * express or implied. See the License for the specific language governing
  * permissions and limitations under the License.
  */
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -29,6 +30,11 @@ using System.Text.RegularExpressions;
 using Amazon.SecurityToken;
 using Amazon.Runtime;
 using Amazon.SecurityToken.Model;
+
+// ******************* 2016/02/10 MZ **************************
+// Use HtmlAgilityPack to Parse HTML
+using HtmlAgilityPack;
+// ******************* 2016/02/10 MZ **************************
 
 namespace AWSSAML
 {
@@ -58,6 +64,26 @@ namespace AWSSAML
 
             return samlAssertion;
         }
+
+        // ******************* 2016/02/10 MZ **************************
+        public string GetSamlAssertionFormBasedMFA(string identityProvider, NetworkCredential credential, NetworkCredential additionalCredential)
+        {
+
+            string samlAssertion = "";
+            string responseStreamData = getResultFormBasedMFA(identityProvider, credential, additionalCredential);
+
+            Regex reg = new Regex("SAMLResponse\\W+value\\=\\\"([^\\\"]+)\\\"");
+            MatchCollection matches = reg.Matches(responseStreamData);
+            string last = null;
+            foreach (Match m in matches)
+            {
+                last = m.Groups[1].Value;
+                samlAssertion = last;
+            }
+
+            return samlAssertion;
+        }
+        // ******************* 2016/02/10 MZ **************************
 
         public string[] GetAwsSamlRoles(string samlAssertion)
         {
@@ -149,5 +175,187 @@ namespace AWSSAML
 
             return response;    
         }
+
+        // ******************* 2016/02/10 MZ **************************
+        // get Result using Form-based authentication to support MFA
+        // return Response's StreamData instead of the HttpWebResponse
+        private string getResultFormBasedMFA(string url, NetworkCredential credential, NetworkCredential additionalCredential)
+        {
+            Uri uri = new Uri(url);
+            // Persistent cookies
+            System.Net.CookieContainer myCookies = new System.Net.CookieContainer();
+            // Query ADFS logon page to get initial session information
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(uri);
+            request.UserAgent = "Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.2; WOW64; Trident/6.0)";
+            request.KeepAlive = true;
+            // Try NTLM one more time anyway even though it might have failed in previous attempt. 
+            CredentialCache credCache = new CredentialCache();
+            credCache.Add(uri, "NTLM", CredentialCache.DefaultNetworkCredentials);
+            request.Credentials = credCache;
+            request.PreAuthenticate = true;
+            request.AllowAutoRedirect = true;
+            request.CookieContainer = myCookies;
+            HttpWebResponse response = (HttpWebResponse)request.GetResponse();
+            Stream responseStream = response.GetResponseStream();
+            StreamReader responseStreamReader = new StreamReader(responseStream);
+            string responseStreamData = responseStreamReader.ReadToEnd();
+
+            // Check if default authentication with NTLM Impersonation worked or not
+            // If it returns a SAML response
+            if (responseStreamData.Contains("SAMLResponse"))
+            {
+                return responseStreamData;
+            }
+            // If it didn't return any SAM response, try form authentication
+            else
+            {
+                //Parse HTML forms from previous response with HtmlAgilityPack
+                HtmlDocument doc = new HtmlDocument();
+                doc.LoadHtml(responseStreamData);
+                HtmlNode rootNode = doc.DocumentNode;
+                // map to hold the form input fields
+                Dictionary<string, string> payloadData = new Dictionary<string, string>();
+                foreach (HtmlNode node in rootNode.Descendants("input"))
+                {
+                    string input_name = node.Attributes["name"].Value;
+                    string input_value = "";
+                    if (node.Attributes["value"] != null)
+                        input_value = node.Attributes["value"].Value;
+
+                    if (input_name.ToLower().Contains("username"))
+                    {
+                        if (credential.Domain != null)
+                        {
+                            payloadData[input_name] = credential.Domain + "\\" + credential.UserName;
+                        }
+                        else
+                        {
+                            payloadData[input_name] = credential.UserName;
+                        }
+                    }
+                    else if (input_name.ToLower().Contains("password"))
+                    {
+                        // Placeholder: Add logic to let user enter OTP again
+                        
+                        payloadData[input_name] = credential.Password;
+                    }
+                    else
+                    {
+                        if (payloadData.ContainsKey(input_name) && payloadData[input_name] != "" && input_value == "")
+                        {
+                            //DO nothing
+                        }
+                        else
+                        {
+                            payloadData[input_name] = input_value;
+                        }
+                    }
+                }
+
+                //Construct payload for Post
+                string payload = "";
+                foreach (string key in payloadData.Keys)
+                {
+                    payload += key + "=" + payloadData[key] + "&";
+                }
+                //Remove last &
+                payload = payload.TrimEnd('&');
+                request = (HttpWebRequest)WebRequest.Create(uri);
+                request.CookieContainer = myCookies;
+                request.ContentType = "application/x-www-form-urlencoded";
+                request.Method = "POST";
+                byte[] postData = Encoding.UTF8.GetBytes(payload);
+                request.ContentLength = postData.Length;
+                Stream postStream = request.GetRequestStream();
+                postStream.Write(postData, 0, postData.Length);
+                postStream.Close();
+
+                response = (HttpWebResponse)request.GetResponse();
+                responseStream = response.GetResponseStream();
+                responseStreamReader = new StreamReader(responseStream);
+                responseStreamData = responseStreamReader.ReadToEnd();
+
+                // Check if response contains SAML Response or not
+                // If it contains a SAML Response
+                if (responseStreamData.Contains("SAMLResponse"))
+                {
+                    return responseStreamData;
+                }
+                // If it didn't contain any SAM response, let's check if it requires MFA
+                else
+                {
+                    //Parse HTML forms from previous response with HtmlAgilityPack
+                    doc = new HtmlDocument();
+                    doc.LoadHtml(responseStreamData);
+                    rootNode = doc.DocumentNode;
+                    // map to hold the form input fields
+                    payloadData = new Dictionary<string, string>();
+                    foreach (HtmlNode node in rootNode.Descendants("input"))
+                    {
+                        string input_name = node.Attributes["name"].Value;
+                        string input_value = "";
+                        if (node.Attributes["value"] != null)
+                            input_value = node.Attributes["value"].Value;
+
+                        if (input_name.ToLower().Contains("password"))
+                        {
+                            if (additionalCredential.Password == null || additionalCredential.Password == "")
+                                Console.WriteLine("Missing OTP.");
+                             payloadData[input_name] = additionalCredential.Password;
+                        }
+                        else
+                        {
+                            if (payloadData.ContainsKey(input_name) && payloadData[input_name] != "" && input_value == "")
+                            {
+                                //DO nothing
+                            }
+                            else
+                            {
+                                payloadData[input_name] = input_value;
+                            }
+                        }
+                    }
+
+                    //Construct payload for Post
+                    payload = "";
+                    foreach (string key in payloadData.Keys)
+                    {
+                        payload += key + "=" + System.Web.HttpUtility.UrlEncode(payloadData[key]) + "&";
+                    }
+                    //Remove last &
+                    payload = payload.TrimEnd('&');
+                    request = (HttpWebRequest)WebRequest.Create(uri);
+                    request.CookieContainer = myCookies;
+                    request.ContentType = "application/x-www-form-urlencoded";
+                    request.Method = "POST";
+                    postData = Encoding.UTF8.GetBytes(payload);
+                    request.ContentLength = postData.Length;
+                    postStream = request.GetRequestStream();
+                    postStream.Write(postData, 0, postData.Length);
+                    postStream.Close();
+
+                    response = (HttpWebResponse)request.GetResponse();
+                    responseStream = response.GetResponseStream();
+                    responseStreamReader = new StreamReader(responseStream);
+                    responseStreamData = responseStreamReader.ReadToEnd();
+
+                    // Check if response contains SAML Response or not
+                    // If it contains a SAML Response
+                    if (responseStreamData.Contains("SAMLResponse"))
+                    {
+                        return responseStreamData;
+                    }
+                    // If it didn't contain any SAM response, there was a problem ... 
+                    else
+                    {
+                        // Do nothing and let the final return statement to return data as it is for possible debugging
+                    }
+                }
+            }
+
+            return responseStreamData;
+        }
+        // ******************* 2016/02/10 MZ **************************
+
     }
 }

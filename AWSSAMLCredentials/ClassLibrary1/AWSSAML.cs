@@ -92,6 +92,19 @@ namespace AWSSAML
             get { return roleIndex; }
             set { roleIndex = value; }
         }
+        private bool isMFAEnabled = false;
+        [Parameter(
+            Mandatory = false,
+            ValueFromPipeline = true,
+            ValueFromPipelineByPropertyName = true,
+            Position = 3,
+            HelpMessage = "Is MFA enabled?"
+         )]
+        public bool IsMFAEnabled
+        {
+            get { return isMFAEnabled; }
+            set { isMFAEnabled = value; }
+        }
 
         protected override void ProcessRecord()
         {
@@ -101,6 +114,7 @@ namespace AWSSAML
                 SessionAWSCredentials awsSessionCredentials = null;
 
                 ICredentials userCredentials = AskUserForCredentials(useCurrentCredentials);
+                NetworkCredential additionalCredentials = AskUserForCredentialsMFA(isMFAEnabled);
 
                 Uri uri = new Uri(identityProviderUrl);
                 NetworkCredential networkCredentials = userCredentials.GetCredential(uri, "");
@@ -110,6 +124,17 @@ namespace AWSSAML
                 }
 
                 string samlAssertion = awsSamlUtils.GetSamlAssertion(identityProviderUrl);
+                // ******************* 2016/02/10 MZ **************************
+                if(samlAssertion == "")
+                {
+                    if (isMFAEnabled && additionalCredentials.Password == null)
+                    {
+                        // Assuming isMFAEnabled parameter was enter incorrectly as blank, let the user enter again
+                        additionalCredentials = AskUserForCredentialsMFA(true);
+                    }
+                    samlAssertion = awsSamlUtils.GetSamlAssertionFormBasedMFA(identityProviderUrl, networkCredentials, additionalCredentials);
+                }
+                // ******************* 2016/02/10 MZ **************************
                 string[] awsSamlRoles = awsSamlUtils.GetAwsSamlRoles(samlAssertion);
                 UnImpersonateUser();
 
@@ -156,6 +181,27 @@ namespace AWSSAML
             }
         }
 
+        // ******************* 2016/02/10 MZ **************************
+        // Ask user for One Time Password for MFA
+        private NetworkCredential AskUserForCredentialsMFA(bool isMFAEnabled)
+        {
+            if (isMFAEnabled)
+            {
+                string userName = null, password, domain = null;
+
+                Console.WriteLine("For security reasons, we require additional information to verify your account. ");
+                Console.Write("Please enter your One Time Password (OTP): ");
+                password = GetPasswordViaConsole();
+                Console.WriteLine();
+                return new NetworkCredential(userName, password, domain);
+            }
+            else
+            {
+                return new NetworkCredential();
+            }
+        }
+        // ******************* 2016/02/10 MZ **************************
+
         private string AskUserForAwsSamlRole(string[] awsSamlRoles)
         {
             Console.WriteLine("Please choose the role you would like to assume:");
@@ -166,10 +212,9 @@ namespace AWSSAML
             }
 
             Console.Write("Selection: ");
-            
+            int roleIndex = 0;
             ConsoleKeyInfo key;
             int index = 0;
-
             do
             {
                 key = Console.ReadKey();
@@ -177,7 +222,7 @@ namespace AWSSAML
             } while (!Char.IsNumber(key.KeyChar) || index > awsSamlRoles.Length - 1);
             Console.WriteLine();
 
-            return awsSamlRoles[index];
+            return awsSamlRoles[roleIndex];
         }
 
         private string GetPasswordViaConsole()
