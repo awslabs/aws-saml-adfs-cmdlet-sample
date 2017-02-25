@@ -56,7 +56,6 @@ namespace AWSSAML
             Mandatory=true,
             ValueFromPipeline=true,
             ValueFromPipelineByPropertyName=true,
-            Position=0,
             HelpMessage="The identity provider URL."
         )]
         public string IdentityProviderUrl
@@ -70,7 +69,6 @@ namespace AWSSAML
             Mandatory = false,
             ValueFromPipeline = true,
             ValueFromPipelineByPropertyName = true,
-            Position = 1,
             HelpMessage = "Use current user Windows credentials."
         )]
         public bool UseCurrentCredentials
@@ -79,18 +77,71 @@ namespace AWSSAML
             set { useCurrentCredentials = value; }
         }
 
-        private int roleIndex = Int16.MaxValue;
+        private string userName = null;
         [Parameter(
             Mandatory = false,
             ValueFromPipeline = true,
             ValueFromPipelineByPropertyName = true,
-            Position = 2,
+            HelpMessage = "Define Username for Authentication."
+        )]
+        public string UserName
+        {
+            get { return userName; }
+            set { userName = value; }
+        }
+
+        private string password = null;
+        [Parameter(
+            Mandatory = false,
+            ValueFromPipeline = true,
+            ValueFromPipelineByPropertyName = true,
+            HelpMessage = "Define Password for Authentication."
+        )]
+        public string Password
+        {
+            get { return password; }
+            set { password = value; }
+        }
+
+        private string domain = null;
+        [Parameter(
+            Mandatory = false,
+            ValueFromPipeline = true,
+            ValueFromPipelineByPropertyName = true,
+            HelpMessage = "Define Domain for Authentication."
+        )]
+        public string Domain
+        {
+            get { return domain; }
+            set { domain = value; }
+        }
+
+        private int roleIndex = Int16.MaxValue;
+        [Parameter(
+            Mandatory = true,
+            ParameterSetName="RoleIndex",
+            ValueFromPipeline = true,
+            ValueFromPipelineByPropertyName = true,
             HelpMessage = "Role index to use."
         )]
         public int RoleIndex
         {
             get { return roleIndex; }
             set { roleIndex = value; }
+        }
+
+        private string roleArn = null;
+        [Parameter(
+            Mandatory = false,
+            ParameterSetName="RoleArn",
+            ValueFromPipeline = true,
+            ValueFromPipelineByPropertyName = true,
+            HelpMessage = "ARN of the IAM role to use."
+        )]
+        public string RoleArn
+        {
+            get { return roleArn; }
+            set { roleArn = value; }
         }
 
         protected override void ProcessRecord()
@@ -100,7 +151,7 @@ namespace AWSSAML
                 AWSSAMLUtils awsSamlUtils = new AWSSAMLUtils();
                 SessionAWSCredentials awsSessionCredentials = null;
 
-                ICredentials userCredentials = AskUserForCredentials(useCurrentCredentials);
+                ICredentials userCredentials = AskUserForCredentials(useCurrentCredentials, userName, password, domain);
 
                 Uri uri = new Uri(identityProviderUrl);
                 NetworkCredential networkCredentials = userCredentials.GetCredential(uri, "");
@@ -114,7 +165,11 @@ namespace AWSSAML
                 UnImpersonateUser();
 
                 string awsSamlRole = null;
-                if (roleIndex < awsSamlRoles.Length)
+                if (!String.IsNullOrEmpty(roleArn))
+                {
+                    awsSamlRole = SelectRoleByArn(awsSamlRoles, roleArn);
+                }
+                else if (roleIndex < awsSamlRoles.Length)
                 {
                     awsSamlRole = awsSamlRoles[roleIndex];
                 }
@@ -132,25 +187,59 @@ namespace AWSSAML
             }
         }
 
-        private ICredentials AskUserForCredentials(bool useCurrentCredentials)
+        private string SelectRoleByArn(string[] awsSamlRoles, string roleArn)
         {
-            if (useCurrentCredentials)
+            string[] shortenedRoleArray = new string[awsSamlRoles.Length];
+            for (int i = 0; i < awsSamlRoles.Length; i++)
+            {
+                string[] thisRole = awsSamlRoles[i].Split(',');
+                shortenedRoleArray[i] = thisRole[1];
+            }
+            if (Array.IndexOf(shortenedRoleArray, roleArn) != -1)
+            {
+                return awsSamlRoles[Array.IndexOf(shortenedRoleArray, roleArn)];
+            }
+            else
+            {
+                throw new ArgumentException(
+                    string.Format(
+                        "role {0} not found in list of available roles: {1}",
+                        roleArn,
+                        string.Join(
+                            ", ",
+                            shortenedRoleArray
+                        )
+                    )
+                );
+            }
+        }
+
+        private ICredentials AskUserForCredentials(bool useCurrentCredentials, string userName, string password, string domain)
+        {
+            if (useCurrentCredentials && String.IsNullOrEmpty(userName) && String.IsNullOrEmpty(password) && String.IsNullOrEmpty(domain))
             {
                 return CredentialCache.DefaultCredentials;
             }
             else
             {
-                string userName, password, domain = null;
+                if (String.IsNullOrEmpty(userName))
+                {
+                    Console.Write("Username: ");
+                    userName = Console.ReadLine();
+                }
 
-                Console.Write("username: ");
-                userName = Console.ReadLine();
+                if (String.IsNullOrEmpty(password))
+                {
+                    Console.Write("Password: ");
+                    password = GetPasswordViaConsole();
+                    Console.WriteLine();
+                }
 
-                Console.Write("password: ");
-                password = GetPasswordViaConsole();
-                Console.WriteLine();
-
-                Console.Write("domain: ");
-                domain = Console.ReadLine();
+                if (String.IsNullOrEmpty(domain))
+                {
+                    Console.Write("Domain: ");
+                    domain = Console.ReadLine();
+                }
 
                 return new NetworkCredential(userName, password, domain);
             }
@@ -166,7 +255,6 @@ namespace AWSSAML
             }
 
             Console.Write("Selection: ");
-            
             ConsoleKeyInfo key;
             int index = 0;
 
@@ -234,7 +322,7 @@ namespace AWSSAML
             dupeTokenHandle = IntPtr.Zero;
 
             // Call LogonUser to obtain a handle to an access token.
-            // If domain joined 
+            // If domain joined
             bool returnValue = LogonUser(userName, domainName, password, LOGON32_TYPE_NEW_CREDENTIALS,
                                             LOGON32_PROVIDER_WINNT50, ref tokenHandle);
 
